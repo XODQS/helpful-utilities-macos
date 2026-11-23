@@ -7,7 +7,7 @@ A lightweight native macOS menu bar app that brings clipboard history, quick not
 - **Clipboard** — Search recent copied text from the menu bar or with Control–Option–V. Choose an item and paste it with Command–V. History can be paused or cleared.
 - **Quick notes** — Seven locally saved notes, with Markdown preview and text import and export.
 - **App shortcuts** — Tap and release Right Command to display the frontmost app's menu shortcuts. Search, select an enabled command, or print the list and save it as PDF. The gear menu offers alternative hold gestures and adjustable delays.
-- **Window switcher** — Press Command–Tab to cycle windows, then release Command to switch. Press Shift to go backwards or Escape to cancel. Optional thumbnails show available windows.
+- **Window switcher** — Tap Command–Tab to return to the last active app, or hold Command and press Tab to browse. The first pass offers one entry per app, followed by its additional windows. Shift–Tab moves backwards and Escape cancels. Window details and optional previews load separately. An app that cannot provide a window list stays selectable by its icon.
 - **Screenshots** — View enabled macOS screenshot shortcuts and open capture tools from the shortcuts panel.
 
 ## Compatibility
@@ -32,6 +32,8 @@ Move the built app to Applications before opening it. Click the four-square icon
 
 Clipboard history and notes are stored locally in the macOS user account. History keeps up to 80 text items and can be turned off. Notes do not sync through iCloud. App shortcuts depend on what each app exposes through its menus. Window and preview availability varies by app and workspace.
 
+Updates use the same local data folder. Because builds are signed locally, macOS may ask you to allow the updated app again in System Settings → Privacy & Security.
+
 ## Build from source
 
 On an Apple Silicon Mac, install Xcode or Xcode Command Line Tools, then run from the repository root:
@@ -46,6 +48,8 @@ Choose a new output path if that app already exists. The build uses the system S
 ## العربية
 
 **الخدمات المساعدة** يجمع الحافظة والملاحظات واختصارات التطبيقات وتبديل النوافذ في أيقونة واحدة. اضغط ⌘ اليمين وأفلته لعرض اختصارات التطبيق الأمامي، واستخدم ⌘⇥ للتنقل بين النوافذ. إعدادات التسجيل والأذونات والاختصارات متاحة من أيقونة الترس.
+
+في الإصدار 1.3، ضغطة سريعة على ⌘⇥ تعيدك للتطبيق السابق. استمر بالضغط على ⌘ وكرّر Tab لاختيار نافذة، أو اضغط Esc للإلغاء. تظهر التطبيقات مباشرة، وتُحدَّث تفاصيل النوافذ في الخلفية. إذا تعذرت قراءة نوافذ تطبيق، تقدر تختاره بأيقونته.
 
 يستهدف التطبيق أجهزة ماك بمعالجات Apple Silicon ونظام macOS 13 أو أحدث. الملاحظات وسجل الحافظة محفوظان محليًا. جُرّبت الوظائف الأساسية على جهاز M1.
 

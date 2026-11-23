@@ -138,7 +138,7 @@ final class NotesPane: NSView, NSTextViewDelegate {
             self?.flush()
         }
         pending?.tolerance = 0.12
-        showCount()
+        status.stringValue = "جارٍ حفظ التغييرات…"
     }
 
     @objc private func selectNote(_ sender: NSButton) {
@@ -190,7 +190,10 @@ final class NotesPane: NSView, NSTextViewDelegate {
 
     private func showCount() {
         let text = preview ? model.notes[selected] : editor.string
-        let words = text.split(whereSeparator: \.isWhitespace).count
+        let words = text.reduce(into: (count: 0, inWord: false)) { state, character in
+            if !character.isWhitespace && !state.inWord { state.count += 1 }
+            state.inWord = !character.isWhitespace
+        }.count
         let saving = dirty ? "  ·  جارٍ الحفظ" : ""
         status.stringValue = "\(words) كلمة  ·  \(text.count) حرف  ·  محفوظ محليًا\(saving)"
     }
@@ -207,6 +210,7 @@ final class NotesPane: NSView, NSTextViewDelegate {
                 let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
                 guard size <= NoteStore.maxBytes else { throw CocoaError(.fileReadTooLarge) }
                 let text = try String(contentsOf: url, encoding: .utf8)
+                guard self.flush() else { return }
                 if !self.model.notes[slot].isEmpty {
                     let confirm = NSAlert()
                     confirm.messageText = "استبدال محتوى الملاحظة \(slot + 1)؟"
@@ -215,7 +219,7 @@ final class NotesPane: NSView, NSTextViewDelegate {
                     guard confirm.runModal() == .alertFirstButtonReturn else { return }
                 }
                 try self.model.save(text, at: slot)
-                self.loadSelected()
+                if self.selected == slot { self.loadSelected() }
             } catch { self.status.stringValue = "تعذّر الاستيراد. اختر ملف UTF-8 بحجم 512 KiB أو أقل." }
         }
     }

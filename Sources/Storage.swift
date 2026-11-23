@@ -56,7 +56,7 @@ final class ClipboardHistory {
     private var timer: Timer?
     private(set) var clips: [Clip]
     var onChange: (() -> Void)?
-    var onError: ((Error) -> Void)?
+    private(set) var saveFailed = false
 
     init(board: NSPasteboard = .general, store: LocalStore) {
         self.board = board
@@ -117,8 +117,10 @@ final class ClipboardHistory {
     }
 
     private func save() {
-        do { try store.write(clips, to: Self.file) }
-        catch { onError?(error) }
+        do {
+            try store.write(clips, to: Self.file)
+            saveFailed = false
+        } catch { saveFailed = true }
         onChange?()
     }
 }
@@ -140,6 +142,7 @@ final class NoteStore {
     }
 
     func save(_ text: String, at index: Int) throws {
+        guard notes.indices.contains(index), text.utf8.count <= Self.maxBytes else { throw CocoaError(.fileWriteInvalidFileName) }
         guard notes[index] != text else { return }
         var updated = notes
         updated[index] = text

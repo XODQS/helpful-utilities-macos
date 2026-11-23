@@ -69,6 +69,50 @@ func runSelfTests() {
           "notes round-trip UTF-8")
     check(DesktopAccess.shortcutLabel(modifiers: 7, key: "A") == "⌃⌥⇧⌘A" &&
           DesktopAccess.shortcutLabel(modifiers: 8, key: "F3") == "F3", "AX shortcut modifiers")
+    check((try? notes.save("invalid", at: NoteStore.count)) == nil && notes.notes == saved,
+          "out-of-range note write preserves saved notes")
+    let tooLarge = String(repeating: "x", count: NoteStore.maxBytes + 1)
+    check((try? notes.save(tooLarge, at: 0)) == nil && notes.notes == saved,
+          "oversize note write preserves saved notes")
+
+    let current = AppTarget(pid: 11, name: "A")
+    let previous = AppTarget(pid: 12, name: "B")
+    let last = AppTarget(pid: 13, name: "C")
+    let targets = [current, previous, last]
+    let gate = DispatchSemaphore(value: 0)
+    let catalog = WindowCatalog { app in
+        guard app.pid == current.pid else { return app.pid == previous.pid ? nil : [] }
+        guard gate.wait(timeout: .now() + 2) == .success else { return nil }
+        return ["A1", "A2"].map { SwitchWindow(target: app, element: nil, title: $0, minimized: false) }
+    }
+    var refreshed = false
+    catalog.onRefresh = { refreshed = true }
+    catalog.refresh(targets)
+    let initial = catalog.snapshot(targets)
+    check(initial.map(\.title) == ["A", "B", "C"], "all apps selectable during slow window discovery")
+    gate.signal()
+    let until = Date(timeIntervalSinceNow: 3)
+    while !refreshed && Date() < until {
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+    }
+    let full = catalog.snapshot(targets)
+    check(refreshed && full.map(\.title) == ["A1", "B", "C", "A2"],
+          "unresponsive and windowless apps retained, extra windows listed after apps")
+    _ = NSApplication.shared
+    let switcher = WindowSwitcher()
+    switcher.show(initial, step: 1, front: current.pid)
+    check(switcher.selectedWindow?.target.pid == previous.pid, "quick switch selects previous app before panel opens")
+    switcher.update(full)
+    check(switcher.selectedWindow?.target.pid == previous.pid, "refresh preserves quick-switch selection")
+    switcher.move(1)
+    switcher.update(initial)
+    switcher.move(1)
+    check(switcher.selectedWindow?.title == "A2", "navigation order stays stable while cycling")
+    switcher.cancel()
+    switcher.show(initial, step: -1, front: current.pid)
+    check(switcher.selectedWindow?.target.pid == last.pid, "reverse cycle wraps to last app")
+    switcher.cancel()
+    check(!switcher.active && switcher.selectedWindow == nil, "cancel clears selection")
     var gesture = CommandGesture()
     check(!gesture.update(down: true, time: 1), "first Command press does not trigger")
     check(!gesture.update(down: false, time: 1.05), "Command release does not trigger")

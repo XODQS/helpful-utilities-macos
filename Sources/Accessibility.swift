@@ -18,6 +18,9 @@ struct AppTarget {
     let pid: pid_t
     let name: String
 
+}
+
+extension AppTarget {
     init(_ app: NSRunningApplication) {
         pid = app.processIdentifier
         name = app.localizedName ?? "تطبيق"
@@ -143,58 +146,39 @@ enum DesktopAccess {
         return nil
     }
 
-    static func windows(for targets: [AppTarget]) -> [SwitchWindow] {
-        let deadline = ProcessInfo.processInfo.systemUptime + 0.9
+    /// A nil result means that the app did not respond. An empty list is a valid response.
+    static func windows(for target: AppTarget) -> [SwitchWindow]? {
+        let app = application(target.pid)
+        guard let all: [AXUIElement] = read(app, kAXWindowsAttribute) else { return nil }
+        let focused: AXUIElement? = read(app, kAXFocusedWindowAttribute)
+        let ordered = focused.map { front in [front] + all.filter { !CFEqual($0, front) } } ?? all
+        let attributes = [kAXRoleAttribute, kAXTitleAttribute, kAXMinimizedAttribute] as CFArray
         var result: [SwitchWindow] = []
-        for target in targets.prefix(40) {
-            guard ProcessInfo.processInfo.systemUptime < deadline, result.count < 100 else { break }
-            let app = application(target.pid)
-            let windows: [AXUIElement] = read(app, kAXWindowsAttribute) ?? []
-            let focused: AXUIElement? = read(app, kAXFocusedWindowAttribute)
-            let ordered = focused.map { focus in
-                windows.filter { CFEqual($0, focus) } + windows.filter { !CFEqual($0, focus) }
-            } ?? windows
-            for window in ordered.prefix(30) {
-                guard ProcessInfo.processInfo.systemUptime < deadline, result.count < 100 else { break }
-                let role: String? = read(window, kAXSubroleAttribute)
-                guard role == nil || role == kAXStandardWindowSubrole || role == kAXDialogSubrole else { continue }
-                let title: String = read(window, kAXTitleAttribute) ?? ""
-                let minimized: Bool = read(window, kAXMinimizedAttribute) ?? false
+        var receivedAttributes = false
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.4
+        for window in ordered.prefix(30) {
+            var values: CFArray?
+            if AXUIElementCopyMultipleAttributeValues(window, attributes, [], &values) == .success,
+               let fields = values as? [Any], fields.count == 3 {
+                receivedAttributes = true
+                guard fields[0] as? String == kAXWindowRole else { continue }
+                let title = fields[1] as? String ?? ""
                 result.append(SwitchWindow(target: target, element: window,
-                                           title: title.isEmpty ? target.name : title, minimized: minimized))
+                                           title: title.isEmpty ? target.name : title,
+                                           minimized: fields[2] as? Bool ?? false))
             }
+            if ProcessInfo.processInfo.systemUptime >= deadline { break }
         }
-        let onscreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-            as? [[String: Any]] ?? []
-        var visibleRanks: [String: Int] = [:]
-        for (index, item) in onscreen.enumerated() {
-            guard item[kCGWindowLayer as String] as? Int == 0,
-                  let pid = item[kCGWindowOwnerPID as String] as? Int,
-                  let title = item[kCGWindowName as String] as? String, !title.isEmpty else { continue }
-            let key = "\(pid)/\(title)"
-            if visibleRanks[key] == nil { visibleRanks[key] = index }
-        }
-        return result.enumerated().sorted { left, right in
-            func rank(_ value: (offset: Int, element: SwitchWindow)) -> Int {
-                let window = value.element
-                return visibleRanks["\(window.target.pid)/\(window.title)"] ?? (onscreen.count + value.offset)
-            }
-            let a = rank(left), b = rank(right)
-            return a == b ? left.offset < right.offset : a < b
-        }.map(\.element)
+        return ordered.isEmpty || receivedAttributes ? result : nil
     }
 
-    static func focus(_ window: SwitchWindow) -> Bool {
-        guard let app = NSRunningApplication(processIdentifier: window.target.pid),
-              !app.isTerminated, let element = window.element else { return false }
-        if app.isHidden { app.unhide() }
+    static func raise(_ window: SwitchWindow) {
+        guard let element = window.element else { return }
         if window.minimized {
             AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         }
-        let focused = AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
-        let raised = AXUIElementPerformAction(element, kAXRaiseAction as CFString)
-        let activated = app.activate(options: [.activateIgnoringOtherApps])
-        return activated && (focused == .success || raised == .success)
+        AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementPerformAction(element, kAXRaiseAction as CFString)
     }
 
 }

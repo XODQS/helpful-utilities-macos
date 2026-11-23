@@ -55,7 +55,7 @@ final class GlobalKeys {
     private var gesture = CommandGesture()
     private var rightTapArmed = false
     private var hold: DispatchWorkItem?
-    private var switchExpiry: DispatchWorkItem?
+    private var releaseWatch: Timer?
     private var switching = false
     private var reading = false
     private var clipboardKey = false
@@ -106,7 +106,7 @@ final class GlobalKeys {
 
     private func reset() {
         endShortcutDisplay()
-        switchExpiry?.cancel()
+        releaseWatch?.invalidate()
         gesture.reset()
         rightTapArmed = false
         if switching { onCancel?() }
@@ -125,7 +125,7 @@ final class GlobalKeys {
             if switching {
                 if !modifiers.contains(.maskCommand) {
                     switching = false
-                    switchExpiry?.cancel()
+                    releaseWatch?.invalidate()
                     DispatchQueue.main.async { [weak self] in self?.onCommit?() }
                 }
                 return false
@@ -174,15 +174,21 @@ final class GlobalKeys {
         }
         if windowKeys, key == kVK_Tab,
            modifiers == [.maskCommand] || modifiers == [.maskCommand, .maskShift] {
-            switching = true
-            switchExpiry?.cancel()
-            let expiry = DispatchWorkItem { [weak self] in
-                guard let self, self.switching else { return }
-                self.switching = false
-                self.onCancel?()
+            if !switching {
+                // If permission is revoked while running, leave Command–Tab to macOS.
+                guard DesktopAccess.allowed, !IsSecureEventInputEnabled() else { return false }
+                switching = true
+                let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] timer in
+                    guard let self, self.switching else { timer.invalidate(); return }
+                    if !CGEventSource.flagsState(.combinedSessionState).contains(.maskCommand) {
+                        timer.invalidate()
+                        self.switching = false
+                        self.onCommit?()
+                    }
+                }
+                releaseWatch = timer
+                RunLoop.main.add(timer, forMode: .common)
             }
-            switchExpiry = expiry
-            DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: expiry)
             let step = modifiers.contains(.maskShift) ? -1 : 1
             DispatchQueue.main.async { [weak self] in self?.onCycle?(step) }
             return true
@@ -194,7 +200,7 @@ final class GlobalKeys {
         }
         if switching, key == kVK_Escape || key == kVK_Return {
             switching = false
-            switchExpiry?.cancel()
+            releaseWatch?.invalidate()
             DispatchQueue.main.async { [weak self] in
                 if key == kVK_Escape { self?.onCancel?() } else { self?.onCommit?() }
             }

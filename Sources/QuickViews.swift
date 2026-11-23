@@ -99,10 +99,12 @@ final class ClipPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSSear
     }
 
     func update(_ clips: [Clip], recording: Bool, storageIssue: Bool) {
+        let selection = matches.indices.contains(table.selectedRow) ? self.clips[matches[table.selectedRow]].text : nil
         self.clips = clips
         self.recording = recording
         self.storageIssue = storageIssue
         filter()
+        if let selection, let row = matches.firstIndex(where: { clips[$0].text == selection }) { select(row) }
     }
 
     @objc private func filter() {
@@ -253,6 +255,7 @@ final class ShortcutBoard: NSView, NSSearchFieldDelegate {
     private let host = FlippedView()
     private var content: NSView?
     private var matches: [Shortcut] = []
+    private var searchUpdate: DispatchWorkItem?
     private let columns: Int
 
     init(transient: Bool) {
@@ -292,7 +295,12 @@ final class ShortcutBoard: NSView, NSSearchFieldDelegate {
 
     func showStatus(_ value: String) { caption.stringValue = value }
 
-    func controlTextDidChange(_ notification: Notification) { rebuild() }
+    func controlTextDidChange(_ notification: Notification) {
+        searchUpdate?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.rebuild() }
+        searchUpdate = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.09, execute: work)
+    }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         guard selector == #selector(NSResponder.cancelOperation(_:)), search.stringValue.isEmpty else { return false }
@@ -303,11 +311,19 @@ final class ShortcutBoard: NSView, NSSearchFieldDelegate {
     @objc private func printList() { if !matches.isEmpty { onPrint?(title.stringValue, matches) } }
 
     private func rebuild() {
+        searchUpdate?.cancel()
+        searchUpdate = nil
         content?.removeFromSuperview()
         let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let visible = matches.filter {
             query.isEmpty || $0.title.localizedStandardContains(query)
                           || $0.group.localizedStandardContains(query) || $0.keys.localizedStandardContains(query)
+        }
+        if visible.isEmpty, !query.isEmpty {
+            let empty = hint("لا توجد اختصارات مطابقة. جرّب اسم الأمر أو رمز الاختصار.")
+            content = empty
+            fill(empty, in: host)
+            return
         }
         let stacks = (0..<columns).map { _ in column([], insets: 0) }
         var loads = Array(repeating: 0, count: columns)

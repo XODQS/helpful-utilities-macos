@@ -38,6 +38,7 @@ final class UtilitiesApp: NSObject, NSApplicationDelegate, NSPopoverDelegate, NS
     private var holdBusy = false
     private var previousApp: NSRunningApplication?
     private var clipboardDestination: NSRunningApplication?
+    private let windowCatalog = WindowCatalog()
     private var recentApps: [pid_t] = []
     private var appChanges: NSObjectProtocol?
     private var activeChanges: NSObjectProtocol?
@@ -49,7 +50,6 @@ final class UtilitiesApp: NSObject, NSApplicationDelegate, NSPopoverDelegate, NS
     private var shortcuts: ShortcutBoard?
     private var shortcutOverlay: NSPanel?
     private var switcher: WindowSwitcher?
-    private var clipboardProblem = false
     private let testMode: Bool
     private let benchmarkMode: Bool
 
@@ -98,7 +98,6 @@ final class UtilitiesApp: NSObject, NSApplicationDelegate, NSPopoverDelegate, NS
         popover.delegate = self
 
         history.onChange = { [weak self] in self?.refreshClipboard() }
-        history.onError = { [weak self] _ in self?.clipboardProblem = true }
         history.setRecording(benchmarkMode || preferences.bool(forKey: Preference.recording))
         previousApp = NSWorkspace.shared.frontmostApplication
         appChanges = NSWorkspace.shared.notificationCenter.addObserver(
@@ -123,6 +122,13 @@ final class UtilitiesApp: NSObject, NSApplicationDelegate, NSPopoverDelegate, NS
         keys.onCommandHold = { [weak self] in self?.showShortcutOverlay() }
         keys.onCommandEnd = { [weak self] in self?.hideShortcutOverlay() }
         installKeys()
+        if !testMode, !benchmarkMode, DesktopAccess.allowed, preferences.bool(forKey: Preference.commandTab) {
+            let visible = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            for item in visible where item[kCGWindowLayer as String] as? Int == 0 {
+                if let pid = item[kCGWindowOwnerPID as String] as? pid_t, !recentApps.contains(pid) { recentApps.append(pid) }
+            }
+            windowCatalog.refresh(orderedTargets(front: frontmost()?.processIdentifier))
+        }
 
         if testMode {
             let model = NoteStore(store: store)
@@ -305,7 +311,7 @@ final class UtilitiesApp: NSObject, NSApplicationDelegate, NSPopoverDelegate, NS
 
     private func refreshClipboard() {
         clipboard?.update(history.clips, recording: preferences.bool(forKey: Preference.recording),
-                          storageIssue: clipboardProblem)
+                          storageIssue: history.saveFailed)
     }
 
     private func frontmost() -> NSRunningApplication? {
@@ -540,7 +546,9 @@ final class UtilitiesApp: NSObject, NSApplicationDelegate, NSPopoverDelegate, NS
         loadShortcuts(target: target) { [weak self, weak view] commands in
             guard let self, self.shortcutRequest == request else { return }
             view?.onChoose = { [weak self] shortcut in self?.performShortcut(shortcut, target: target) }
-            let caption = commands.isEmpty ? "ما ظهرت اختصارات في القوائم." : "\(commands.count) اختصار  ·  انقر على أمر لتنفيذه"
+            let caption = commands.allSatisfy { $0.screenshot != nil }
+                ? (commands.isEmpty ? "لم تظهر اختصارات في قوائم التطبيق." : "لم تظهر اختصارات في قوائم التطبيق. المعروض اختصارات النظام.")
+                : "\(commands.count) اختصار  ·  انقر على أمر لتنفيذه"
             view?.update(app: target.name, shortcuts: commands, caption: caption)
         }
     }
@@ -600,27 +608,32 @@ final class UtilitiesApp: NSObject, NSApplicationDelegate, NSPopoverDelegate, NS
         let switcher = windowSwitcher()
         if let step, switcher.active { switcher.move(step); return }
         let front = frontmost()?.processIdentifier
+        let targets = orderedTargets(front: front)
+        windowCatalog.onRefresh = { [weak self, weak switcher] in
+            guard let self, let switcher, switcher.active else { return }
+            switcher.update(self.windowCatalog.snapshot(targets))
+        }
+        windowCatalog.refresh(targets)
+        switcher.previewsEnabled = preferences.bool(forKey: Preference.previews)
+        switcher.show(windowCatalog.snapshot(targets), step: step, front: front)
+    }
+
+    private func orderedTargets(front: pid_t?) -> [AppTarget] {
         let ranking = ([front].compactMap { $0 } + recentApps).enumerated()
         var ranks: [pid_t: Int] = [:]
         for (index, pid) in ranking where ranks[pid] == nil { ranks[pid] = index }
-        let targets = NSWorkspace.shared.runningApplications
+        return NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular && !$0.isTerminated && $0.processIdentifier != getpid() }
             .map(AppTarget.init).sorted {
                 let left = ranks[$0.pid] ?? Int.max
                 let right = ranks[$1.pid] ?? Int.max
                 return left == right ? $0.pid < $1.pid : left < right
             }
-        switcher.previewsEnabled = preferences.bool(forKey: Preference.previews)
-        switcher.show(targets: targets, step: step,
-                      hasFrontWindowCandidate: front != nil && front == targets.first?.pid)
     }
 
     private func windowSwitcher() -> WindowSwitcher {
         if let switcher { return switcher }
         let view = WindowSwitcher()
-        view.onFailure = { [weak self] in
-            self?.alert("تعذّر فتح النافذة", detail: "جرّب اختيارها مرة أخرى إذا كانت لا تزال مفتوحة.")
-        }
         switcher = view
         return view
     }

@@ -49,7 +49,7 @@ private final class WindowCard: NSView {
         fallbackIcon = fallback
         title.stringValue = window.title
         title.font = .systemFont(ofSize: 12, weight: .semibold)
-        name.stringValue = window.target.name + (window.minimized ? "  ·  مصغّرة" : "")
+        name.stringValue = (window.element == nil ? "تطبيق" : window.target.name) + (window.minimized ? "  ·  مصغّرة" : "")
         name.alignment = .natural
         name.font = .systemFont(ofSize: 10)
         for field in [title, name] {
@@ -104,19 +104,19 @@ final class WindowSwitcher: NSObject, NSWindowDelegate {
     private let title = heading("تبديل النوافذ")
     private let caption = hint("")
     private var windows: [SwitchWindow] = []
-    private var cards: [WindowCard] = []
+    private var cards: [Int: WindowCard] = [:]
+    private var isRendering = false
+    private var manual = false
+    private var userNavigated = false
     private var selected = 0
     private var request = UUID()
-    private var loading = false
-    private var pendingCommit = false
-    private var offset = 0
     private var previewTask: Task<Void, Never>?
     private var attempted = Set<Int>()
     private var previewSource: Any?
+    private var pendingFocus: BlockOperation?
     private let queue = DispatchQueue(label: "helpful.window-access", qos: .userInitiated)
     var previewsEnabled = false
     private(set) var active = false
-    var onFailure: (() -> Void)?
 
     override init() {
         super.init()
@@ -173,35 +173,32 @@ final class WindowSwitcher: NSObject, NSWindowDelegate {
         panel.contentView = material
     }
 
-    func show(targets: [AppTarget], step: Int?, hasFrontWindowCandidate: Bool) {
+    func show(_ available: [SwitchWindow], step: Int?, front: pid_t?) {
         if active, let step { move(step); return }
+        pendingFocus?.cancel()
         cancel()
         active = true
-        loading = true
-        offset = step ?? 0
-        caption.stringValue = "جارٍ قراءة النوافذ…"
-        position(width: 440)
-        if step == nil { panel.makeKeyAndOrderFront(nil); panel.makeFirstResponder(panel) }
-        else { panel.orderFrontRegardless() }
+        windows = available
+        manual = step == nil
+        // The first pass contains one entry per app in activation order.
+        let base = step == 1 && available.first?.target.pid != front ? -1 : 0
+        select(base + (step ?? 0))
         let current = request
-        queue.async { [weak self] in
-            let available = DesktopAccess.windows(for: targets)
-            DispatchQueue.main.async {
-                guard let self, self.active, current == self.request else { return }
-                self.loading = false
-                let frontMatches = hasFrontWindowCandidate && available.first?.target.pid == targets.first?.pid
-                let initial = step != nil && !frontMatches && self.offset > 0 ? self.offset - 1 : self.offset
-                self.display(available, startingAt: initial)
-                if self.pendingCommit { self.commit() }
-            }
+        let present = { [weak self] in
+            guard let self, self.active, self.request == current else { return }
+            self.isRendering = true
+            self.position(width: max(350, min(905, CGFloat(self.windows.count) * 175 + 26)))
+            self.render()
+            if self.manual { self.panel.makeKeyAndOrderFront(nil); self.panel.makeFirstResponder(self.panel) }
+            else { self.panel.orderFrontRegardless() }
         }
+        if manual { present() }
+        else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.09, execute: present) }
     }
 
     func displaySample(_ sample: [SwitchWindow]) {
-        cancel()
-        active = true
-        display(sample, startingAt: 1)
-        panel.makeKeyAndOrderFront(nil)
+        show(sample, step: nil, front: nil)
+        move(1)
     }
 
     private func position(width: CGFloat) {
@@ -214,34 +211,63 @@ final class WindowSwitcher: NSObject, NSWindowDelegate {
                               width: size.width, height: size.height), display: true)
     }
 
-    private func display(_ available: [SwitchWindow], startingAt initial: Int) {
-        windows = available
-        var icons: [pid_t: NSImage] = [:]
-        for (index, window) in windows.enumerated() {
-            let pid = window.target.pid
-            if icons[pid] == nil { icons[pid] = NSRunningApplication(processIdentifier: pid)?.icon }
-            let card = WindowCard(window: window, image: icons[pid])
-            card.activate = { [weak self] in self?.select(index); self?.commit() }
-            cards.append(card)
-            strip.addArrangedSubview(card)
+    func update(_ refreshed: [SwitchWindow]) {
+        guard active, !userNavigated, windows.indices.contains(selected) else { return }
+        let prior = windows[selected]
+        let exact = refreshed.firstIndex { candidate in
+            guard let a = prior.element, let b = candidate.element else { return false }
+            return CFEqual(a, b)
         }
-        position(width: max(350, min(905, CGFloat(windows.count) * 175 + 26)))
-        if windows.isEmpty { caption.stringValue = "ما ظهرت نوافذ متاحة للتبديل."; return }
-        select(initial)
+        guard let index = exact ?? refreshed.firstIndex(where: { $0.target.pid == prior.target.pid }) else { return }
+        if isRendering {
+            request = UUID()
+            clearCards()
+        }
+        windows = refreshed
+        if isRendering { position(width: max(350, min(905, CGFloat(windows.count) * 175 + 26))) }
+        select(index)
     }
 
     func move(_ amount: Int) {
-        if loading { offset += amount; return }
+        userNavigated = true
         select(selected + amount)
     }
 
     private func select(_ index: Int) {
         guard !windows.isEmpty else { return }
         selected = (index % windows.count + windows.count) % windows.count
-        for (index, card) in cards.enumerated() { card.highlight(index == selected) }
+        if isRendering { render() }
+    }
+
+    private func render() {
+        guard !windows.isEmpty else {
+            caption.stringValue = "افتح تطبيقًا بنافذة ثم حاول مرة أخرى."
+            return
+        }
+        // Only build cards near the selection, even with hundreds of open windows.
+        let start = min(max(0, selected - 2), max(0, windows.count - 5))
+        let range = start..<min(start + 5, windows.count)
+        for index in Array(cards.keys) where !range.contains(index) {
+            if let card = cards.removeValue(forKey: index) {
+                strip.removeArrangedSubview(card)
+                card.removeFromSuperview()
+                attempted.remove(index)
+            }
+        }
+        for index in range {
+            let window = windows[index]
+            if cards[index] == nil {
+                let card = WindowCard(window: window, image: NSRunningApplication(processIdentifier: window.target.pid)?.icon)
+                card.activate = { [weak self] in self?.select(index); self?.commit() }
+                cards[index] = card
+                strip.insertArrangedSubview(card, at: index - start)
+            }
+            cards[index]?.highlight(index == selected)
+        }
         strip.layoutSubtreeIfNeeded()
-        strip.scrollToVisible(cards[selected].frame.insetBy(dx: -6, dy: 0))
-        caption.stringValue = "\(selected + 1) من \(windows.count)   ·   التالي \u{2066}⇥\u{2069}   ·   السابق \u{2066}⇧⇥\u{2069}   ·   أفلت ⌘ للاختيار"
+        if let card = cards[selected] { strip.scrollToVisible(card.frame.insetBy(dx: -6, dy: 0)) }
+        let action = manual ? "اضغط ↵ أو انقر للاختيار" : "أفلت ⌘ للاختيار"
+        caption.stringValue = "\(selected + 1) من \(windows.count)   ·   \(action)   ·   Esc للإلغاء"
         loadPreviews(around: selected)
     }
 
@@ -249,7 +275,7 @@ final class WindowSwitcher: NSObject, NSWindowDelegate {
         guard previewsEnabled, #available(macOS 14, *), previewTask == nil else { return }
         let current = request
         let indices = [index, index - 1, index + 1, index - 2, index + 2]
-            .filter { windows.indices.contains($0) && !attempted.contains($0) }
+            .filter { cards[$0] != nil && !attempted.contains($0) }
         guard !indices.isEmpty, attempted.count < 12 else { return }
         previewTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -269,35 +295,51 @@ final class WindowSwitcher: NSObject, NSWindowDelegate {
                 self.attempted.insert(candidate)
                 if let image = await source.image(for: self.windows[candidate]),
                    self.request == current, !Task.isCancelled {
-                    self.cards[candidate].setPreview(image)
+                    self.cards[candidate]?.setPreview(image)
                 }
             }
         }
     }
 
+    var selectedWindow: SwitchWindow? { windows.indices.contains(selected) ? windows[selected] : nil }
+
     @objc func commit() {
-        if loading { pendingCommit = true; return }
-        let chosen = windows.indices.contains(selected) ? windows[selected] : nil
+        let chosen = selectedWindow
         cancel()
-        guard let chosen, chosen.element != nil else { return }
-        queue.async { [weak self] in
-            if !DesktopAccess.focus(chosen) { DispatchQueue.main.async { self?.onFailure?() } }
+        guard let chosen, let app = NSRunningApplication(processIdentifier: chosen.target.pid),
+              !app.isTerminated else { return }
+        if app.isHidden { app.unhide() }
+        let activated = app.activate(options: [.activateIgnoringOtherApps])
+        let operation = BlockOperation()
+        operation.addExecutionBlock { [weak operation] in
+            guard let operation, !operation.isCancelled else { return }
+            if !activated && !app.isTerminated {
+                AXUIElementSetAttributeValue(DesktopAccess.application(chosen.target.pid),
+                                             kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+            }
+            if !operation.isCancelled { DesktopAccess.raise(chosen) }
         }
+        pendingFocus = operation
+        queue.async { operation.start() }
     }
 
     @objc func cancel() {
         request = UUID()
         active = false
-        loading = false
-        pendingCommit = false
+        isRendering = false
+        userNavigated = false
+        clearCards()
+        windows.removeAll()
+        selected = 0
+        if panel.isVisible { panel.orderOut(nil) }
+    }
+
+    private func clearCards() {
         previewTask?.cancel()
         previewTask = nil
         previewSource = nil
         attempted.removeAll()
-        windows.removeAll()
-        for card in cards { strip.removeArrangedSubview(card); card.removeFromSuperview() }
+        for card in cards.values { strip.removeArrangedSubview(card); card.removeFromSuperview() }
         cards.removeAll()
-        selected = 0
-        panel.orderOut(nil)
     }
 }
